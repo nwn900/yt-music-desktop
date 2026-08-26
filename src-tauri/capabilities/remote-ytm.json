@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "remote-ytm",
+  "description": "Grants the music.youtube.com remote page access to the playback bridge (media_update command). Everything else stays locked.",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["https://music.youtube.com/*"]
+  },
+  "permissions": ["core:event:default"]
+}

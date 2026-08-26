@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mini Player</title>
+<style>
+  :root {
+    --bg: #0f0f10;
+    --panel: #181818;
+    --text: #f1f1f1;
+    --muted: #aaa;
+    --accent: #ff0033;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; font-family: "Segoe UI", system-ui, sans-serif; }
+  body { padding: 6px; }
+  .shell {
+    width: 100%; height: 100%;
+    background: linear-gradient(160deg, #1c1c1e, #121214);
+    border: 1px solid #2c2c30;
+    border-radius: 10px;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .dragstrip { height: 16px; flex: 0 0 16px; -webkit-app-region: drag; cursor: move; }
+  .body { display: flex; align-items: center; gap: 10px; padding: 0 12px 8px; flex: 1; min-height: 0; }
+  .art {
+    width: 84px; height: 84px; flex: 0 0 84px;
+    border-radius: 8px; background: #2a2a2e center/cover no-repeat;
+    position: relative; overflow: hidden;
+  }
+  .art img { width: 100%; height: 100%; object-fit: cover; display: none; }
+  .art.playing::after {
+    content: ""; position: absolute; inset: 0; margin: auto;
+    width: 0; height: 0; border-left: 14px solid #fff; border-top: 9px solid transparent; border-bottom: 9px solid transparent;
+    opacity: .92; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5));
+  }
+  .meta { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 2px; }
+  .title { color: var(--text); font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .artist { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .empty { color: var(--muted); font-size: 12px; align-self: center; }
+  .controls { display: flex; align-items: center; gap: 12px; margin-top: 4px; }
+  button {
+    background: none; border: none; color: var(--text); cursor: pointer;
+    font-size: 16px; width: 30px; height: 30px; padding: 0; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; opacity: .9;
+  }
+  button:hover { background: #2c2c30; opacity: 1; }
+  button.play { font-size: 22px; color: #fff; }
+  .progress { height: 3px; background: #333; border-radius: 2px; margin: 0 12px 8px; overflow: hidden; flex: 0 0 3px; }
+  .progress > div { height: 100%; width: 0%; background: var(--accent); border-radius: 2px; transition: width .5s linear; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+  <div class="shell">
+    <div class="dragstrip" data-tauri-drag-region></div>
+    <div class="body" data-tauri-drag-region>
+      <div class="art" data-tauri-drag-region><img id="art-img" alt="" draggable="false"></div>
+      <div class="meta" data-tauri-drag-region>
+        <div class="title" id="title" data-tauri-drag-region></div>
+        <div class="artist" id="artist" data-tauri-drag-region></div>
+        <div class="controls" data-tauri-drag-region>
+          <button id="prev" title="Previous">⏮</button>
+          <button id="play" class="play" title="Play/Pause">▶</button>
+          <button id="next" title="Next">⏭</button>
+        </div>
+      </div>
+    </div>
+    <div class="progress"><div id="bar"></div></div>
+  </div>
+<script>
+(function () {
+  var t = document.getElementById.bind(document);
+  var state = { title: '', artist: '', playing: false, position: 0, duration: 0 };
+
+  function fmt(s) {
+    s = Math.max(0, Math.floor(s));
+    var m = Math.floor(s / 60), x = s % 60;
+    return m + ':' + (x < 10 ? '0' : '') + x;
+  }
+
+  function paint() {
+    t('title').textContent = state.title || '';
+    t('artist').textContent = state.artist || '';
+    t('play').textContent = state.playing ? '⏸' : '▶';
+    document.querySelector('.art').classList.toggle('playing', state.playing);
+    if (state.art) {
+      t('art-img').src = state.art; t('art-img').style.display = 'block';
+    } else { t('art-img').removeAttribute('src'); t('art-img').style.display = 'none'; }
+  }
+
+  function bar() {
+    var pct = (state.duration > 0) ? Math.min(100, (state.position / state.duration) * 100) : 0;
+    t('bar').style.width = pct.toFixed(1) + '%';
+  }
+
+  function send(a, extra) {
+    var payload = { action: a };
+    if (extra) payload.position = extra;
+    __TAURI__.core.invoke('transport', payload).catch(function () {});
+  }
+
+  function onState(s) {
+    state = s;
+    paint(); bar();
+  }
+
+  t('prev').onclick = function () { send('previous'); };
+  t('next').onclick = function () { send('next'); };
+  t('play').onclick = function () { send('toggle'); };
+
+  __TAURI__.event.listen('media-state', function (e) { onState(e.payload); });
+  // 1 Hz elapsed-time interpolation while playing, so the bar moves
+  // without spamming the IPC bridge.
+  setInterval(function () {
+    if (state.playing && state.duration > 0) {
+      state.position = Math.min(state.position + 1, state.duration);
+      bar();
+    }
+  }, 1000);
+})();
+</script>
+</body>
+</html>

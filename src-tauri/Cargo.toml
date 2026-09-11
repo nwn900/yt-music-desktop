@@ -1,6 +1,6 @@
 [package]
 name = "yt-music-desktop"
-version = "0.1.0"
+version = "0.1.1"
 description = "Native desktop wrapper for YouTube Music (WebView2, SMTC media keys, tray, mini-player)"
 authors = ["micha"]
 license = "ISC"
@@ -10,6 +10,8 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+tauri-winrt-notification = "0.7.3"
+tauri-plugin-notification = "2"
 tauri = { version = "2.11", features = ["tray-icon"] }
 tauri-plugin-autostart = "2.5"
 tauri-plugin-single-instance = "2.4"
@@ -29,11 +31,3 @@ lto = true
 codegen-units = 1
 opt-level = "s"
 panic = "abort"
-
-# Workaround: upstream `vswhom-sys 0.1.x` emits a __cplusplus COMDAT that the
-# link.exe shipping with VS 2026 Build Tools (MSVC 14.50) refuses with
-# LNK1143 ("invalid or corrupt file"). A minimal local patch forces the
-# older c++14 language standard and disables the /Zc:__cplusplus macro that
-# the new compiler stamps by default.
-[patch.crates-io]
-vswhom-sys = { path = "../local-patches/vswhom-sys-0.1.3" }

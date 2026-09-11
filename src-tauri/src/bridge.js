@@ -4,7 +4,7 @@
 //
 // YTM DOM drift is the #1 failure mode: every selector lives in SELECTORS
 // below so a page redesign is a one-place patch.
-(function () {
+(function startBridge() {
   'use strict';
 
   var SELECTORS = {
@@ -17,17 +17,16 @@
     previous: '.previous-button'
   };
 
-  var MIN_POLL_MS = 500;   // metadata/state scan
   var POSITION_TICK_MS = 1000; // 1 Hz position scrub while playing
   var playerBar = document.querySelector(SELECTORS.playerBar);
   if (!playerBar) {
     // Page not ready yet (or YTM restructured); retry shortly.
-    setTimeout(arguments.callee, 2000);
+    setTimeout(startBridge, 1000);
     return;
   }
 
   var last = null;
-  var lastPosTick = 0;
+  var scheduled = false;
 
   function current() {
     var bar = document.querySelector(SELECTORS.playerBar);
@@ -69,9 +68,8 @@
       last.title !== p.title || last.artist !== p.artist || last.album !== p.album ||
       last.cover_url !== p.cover_url || last.playing !== p.playing || last.duration !== p.duration;
     if (!changed) return;
-    last = p;
     if (window.__TAURI__ && window.__TAURI__.core) {
-      window.__TAURI__.core.invoke('media_update', p).catch(function () {});
+      window.__TAURI__.core.invoke('media_update', { state: p }).then(function () { last = p; }).catch(function (error) { console.debug('Media bridge:', error); });
     }
   }
 
@@ -85,8 +83,17 @@
     }
   }
 
-  setInterval(scan, MIN_POLL_MS);
+  new MutationObserver(function () {
+    if (scheduled) return;
+    scheduled = true;
+    setTimeout(function () { scheduled = false; scan(); }, 100);
+  }).observe(playerBar, { subtree: true, childList: true, characterData: true });
   setInterval(positionTick, POSITION_TICK_MS);
+  // Media events do not bubble; capture also covers dynamically replaced videos.
+  ['play', 'pause', 'ended', 'durationchange', 'seeked'].forEach(function (event) {
+    document.addEventListener(event, function () { push(current(), true); }, true);
+  });
   // Bridge starts cleanly on SPA-ish navigations.
   window.addEventListener('yt-navigate-finish', scan);
+  scan();
 })();

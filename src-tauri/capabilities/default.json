@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Local windows: mini-player UI + standard core permissions",
-  "windows": ["main", "mini"],
-  "permissions": ["core:default"]
+  "windows": ["mini"],
+  "permissions": ["core:default", "core:window:allow-start-dragging", "allow-transport", "allow-media-snapshot"]
 }

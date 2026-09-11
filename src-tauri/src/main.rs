@@ -20,6 +20,7 @@ static IS_QUITTING: AtomicBool = AtomicBool::new(false);
 
 /// AppHandle clone for the SMTC event-thread -> webview forwarding.
 static APP_HANDLE: Mutex<Option<tauri::AppHandle>> = Mutex::new(None);
+static LAST_TRACK: Mutex<String> = Mutex::new(String::new());
 
 const TARGET_URL: &str = "https://music.youtube.com";
 
@@ -63,21 +64,13 @@ window.__ytmSeek = function (secs) {
     }
 };
 window.clickTransport = function (action) {
-    function btn(sel) { return document.querySelector(sel); }
-    function isPaused(sel) {
-        var el = btn(sel);
-        if (!el) return false;
-        var label = (el.getAttribute('aria-label') || '').toLowerCase();
-        return label.indexOf('play') !== -1;
+    var video = document.querySelector('video');
+    if (action === 'next' || action === 'previous') {
+        document.querySelector(action === 'next' ? '.next-button' : '.previous-button')?.click();
+    } else if (video) {
+        if (action === 'play' || (action === 'toggle' && video.paused)) video.play().catch(console.debug);
+        else if (action === 'pause' || action === 'toggle') video.pause();
     }
-    var b = btn('#play-pause-button');
-    if (!b && action === 'next') b = btn('.next-button');
-    if (!b && action === 'previous') b = btn('.previous-button');
-    if (action === 'play'   && b && isPaused('#play-pause-button')) b.click();
-    if (action === 'pause'  && b && !isPaused('#play-pause-button')) b.click();
-    if (action === 'toggle' && b) b.click();
-    if (action === 'next'     && btn('.next-button'))     btn('.next-button').click();
-    if (action === 'previous' && btn('.previous-button')) btn('.previous-button').click();
 };
 "#;
 
@@ -131,9 +124,45 @@ fn toggle_mini(app: &tauri::AppHandle) {
 #[tauri::command]
 fn media_update(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     smtc: tauri::State<'_, Smtc>,
     state: MediaState,
 ) -> Result<(), String> {
+    let url = window.url().map_err(|e| e.to_string())?;
+    if window.label() != "main"
+        || url.scheme() != "https"
+        || url.host_str() != Some("music.youtube.com")
+    {
+        return Err("Media origin rejected".into());
+    }
+    if state.title.as_ref().is_some_and(|s| s.len() > 4096)
+        || state.artist.as_ref().is_some_and(|s| s.len() > 4096)
+    {
+        return Err("Media metadata too large".into());
+    }
+    let track = format!(
+        "{} — {}",
+        state.title.as_deref().unwrap_or(""),
+        state.artist.as_deref().unwrap_or("")
+    );
+    let mut last = LAST_TRACK.lock().map_err(|e| e.to_string())?;
+    if state.playing && state.title.as_ref().is_some_and(|s| !s.is_empty()) && *last != track {
+        if !last.is_empty()
+            && (!window.is_focused().unwrap_or(false) || !window.is_visible().unwrap_or(false))
+        {
+            let handle = app.clone();
+            tauri_winrt_notification::Toast::new(&app.config().identifier)
+                .title("YouTube Music")
+                .text1(&track.chars().take(300).collect::<String>())
+                .on_activated(move |_| {
+                    show_main(&handle);
+                    Ok(())
+                })
+                .show()
+                .unwrap_or_else(|error| eprintln!("Track notification failed: {error}"));
+        }
+        *last = track;
+    }
     if smtc.update(&state) {
         let _ = app.emit("media-state", &state);
     }
@@ -143,7 +172,15 @@ fn media_update(
 /// Transport action from SMTC events or the mini-player buttons.
 /// `position` (seconds, optional) is for seek actions.
 #[tauri::command]
-fn transport(app: tauri::AppHandle, action: String, position: Option<u64>) -> Result<(), String> {
+fn transport(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    action: String,
+    position: Option<u64>,
+) -> Result<(), String> {
+    if window.label() != "mini" {
+        return Err("Transport requires the local mini-player".into());
+    }
     let main = app
         .get_webview_window("main")
         .ok_or("main window missing")?;
@@ -152,10 +189,7 @@ fn transport(app: tauri::AppHandle, action: String, position: Option<u64>) -> Re
             format!("window.clickTransport && window.clickTransport('{action}');")
         }
         "seek" => {
-            let secs = position.unwrap_or(0);
-            if secs == 0 {
-                return Err("seek without position".into());
-            }
+            let secs = position.ok_or("seek without position")?;
             format!("window.__ytmSeek && window.__ytmSeek({secs});")
         }
         other => return Err(format!("unknown transport action: {other}")),
@@ -163,18 +197,43 @@ fn transport(app: tauri::AppHandle, action: String, position: Option<u64>) -> Re
     main.eval(&js).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn media_snapshot(
+    window: tauri::WebviewWindow,
+    smtc: tauri::State<'_, Smtc>,
+) -> Result<MediaState, String> {
+    if window.label() != "mini" {
+        return Err("Snapshot requires mini-player".into());
+    }
+    Ok(smtc.snapshot())
+}
+
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            Some(vec!["--autostart"]),
         ))
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main(app);
         }))
         .manage(Smtc::default())
-        .invoke_handler(tauri::generate_handler![media_update, transport])
+        .invoke_handler(tauri::generate_handler![
+            media_update,
+            transport,
+            media_snapshot
+        ])
         .setup(|app| {
+            if let Some(mini) = app.get_webview_window("mini") {
+                let handle = mini.clone();
+                mini.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = handle.hide();
+                    }
+                });
+            }
             *APP_HANDLE.lock().unwrap() = Some(app.handle().clone());
 
             let target: url::Url = TARGET_URL.parse().unwrap();
@@ -193,7 +252,9 @@ fn main() {
                     // External links (and anything Google redirects we don't
                     // recognise) open in the system browser. Never silently
                     // kill the navigation: forward it.
-                    let _ = open::that_detached(url.as_str());
+                    if matches!(url.scheme(), "https" | "http" | "mailto") {
+                        let _ = open::that_detached(url.as_str());
+                    }
                     false
                 })
                 .build()?;
@@ -218,7 +279,7 @@ fn main() {
             });
 
             // Start minimized-to-tray when launched at startup.
-            if app.autolaunch().is_enabled().unwrap_or(false) {
+            if std::env::args().any(|arg| arg == "--autostart") {
                 let _ = main_window.hide();
             }
 

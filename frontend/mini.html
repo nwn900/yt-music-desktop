@@ -84,8 +84,8 @@
     t('artist').textContent = state.artist || '';
     t('play').textContent = state.playing ? '⏸' : '▶';
     document.querySelector('.art').classList.toggle('playing', state.playing);
-    if (state.art) {
-      t('art-img').src = state.art; t('art-img').style.display = 'block';
+    if (state.cover_url) {
+      t('art-img').src = state.cover_url; t('art-img').style.display = 'block';
     } else { t('art-img').removeAttribute('src'); t('art-img').style.display = 'none'; }
   }
 
@@ -109,7 +109,9 @@
   t('next').onclick = function () { send('next'); };
   t('play').onclick = function () { send('toggle'); };
 
-  __TAURI__.event.listen('media-state', function (e) { onState(e.payload); });
+  __TAURI__.event.listen('media-state', function (e) { onState(e.payload); }).then(function () {
+    return __TAURI__.core.invoke('media_snapshot');
+  }).then(onState).catch(console.error);
   // 1 Hz elapsed-time interpolation while playing, so the bar moves
   // without spamming the IPC bridge.
   setInterval(function () {

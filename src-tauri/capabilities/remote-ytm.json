@@ -6,5 +6,5 @@
   "remote": {
     "urls": ["https://music.youtube.com/*"]
   },
-  "permissions": ["core:event:default"]
+  "permissions": ["allow-media-update"]
 }

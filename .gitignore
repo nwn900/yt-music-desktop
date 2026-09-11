@@ -1,6 +1,5 @@
 # Rust
 src-tauri/target/
-src-tauri/Cargo.lock
 
 # Tauri
 src-tauri/gen/
@@ -13,3 +12,5 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+/releases/
+/src-tauri/target/

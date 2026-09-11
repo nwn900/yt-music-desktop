@@ -61,6 +61,12 @@ impl Default for Smtc {
 }
 
 impl Smtc {
+    pub fn snapshot(&self) -> MediaState {
+        self.last
+            .lock()
+            .map(|state| state.clone())
+            .unwrap_or_default()
+    }
     /// Inject the souvlaki controls once the main window (and its HWND) exist.
     /// SMTC binding failure must never take the app down: log- and continue.
     pub fn init(&self, hwnd: *mut std::ffi::c_void) {
@@ -79,7 +85,15 @@ impl Smtc {
                 return;
             }
         };
-        if let Err(e) = controls.attach(|_| {}) {
+        if let Err(e) = controls.attach(|event| {
+            let app = crate::APP_HANDLE
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone());
+            if let Some(app) = app {
+                app.state::<Smtc>().forward_event(event);
+            }
+        }) {
             eprintln!("[smtc] attach failed, media keys disabled: {e}");
             return;
         }
@@ -96,8 +110,7 @@ impl Smtc {
         // Forward position when playing even without metadata changes, but
         // clamp to >= 2s deltas so a paused/hidden window doesn't spam SMTC.
         let pos_tick = !metadata_changed
-            && state.playing
-            && last.position_moved(state, 2)
+            && last.position_moved(state, if state.playing { 2 } else { 1 })
             && state.duration.is_some();
 
         if !metadata_changed && !pos_tick {
@@ -106,7 +119,9 @@ impl Smtc {
 
         let result = self.send(state, metadata_changed);
         *last = state.clone();
-        result
+        // The mini-player must still receive state when OS integration fails.
+        let _ = result;
+        true
     }
 
     fn send(&self, state: &MediaState, metadata_changed: bool) -> bool {
@@ -233,5 +248,14 @@ mod tests {
         let a = state("Song A", true, 100, 300);
         let b = state("Song A", false, 100, 300);
         assert!(a.metadata_differs(&b));
+    }
+
+    #[test]
+    fn paused_seek_updates_snapshot_without_os_controls() {
+        let smtc = Smtc::default();
+        assert!(smtc.update(&state("Song", false, 100, 300)));
+        assert!(smtc.update(&state("Song", false, 0, 300)));
+        assert_eq!(smtc.snapshot().position, 0);
+        assert!(!smtc.update(&state("Song", false, 0, 300)));
     }
 }

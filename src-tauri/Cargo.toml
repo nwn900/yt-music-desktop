@@ -1,6 +1,6 @@
 [package]
 name = "yt-music-desktop"
-version = "0.1.1"
+version = "0.1.2"
 description = "Native desktop wrapper for YouTube Music (WebView2, SMTC media keys, tray, mini-player)"
 authors = ["micha"]
 license = "ISC"

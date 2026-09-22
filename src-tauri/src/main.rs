@@ -101,8 +101,54 @@ fn is_allowed_url(url: &url::Url) -> bool {
     }
 }
 
+pub(crate) fn build_main_window(
+    app_handle: &tauri::AppHandle,
+) -> tauri::Result<tauri::WebviewWindow> {
+    let target: url::Url = TARGET_URL.parse().unwrap();
+    let window = WebviewWindowBuilder::new(app_handle, "main", WebviewUrl::External(target))
+        .title("YouTube Music")
+        .inner_size(1200.0, 900.0)
+        .min_inner_size(400.0, 300.0)
+        .initialization_script(INIT_SCRIPT)
+        .initialization_script(BRIDGE_JS)
+        .additional_browser_args(BROWSER_ARGS)
+        .disable_drag_drop_handler()
+        .on_navigation(|url| {
+            if is_allowed_url(url) {
+                return true;
+            }
+            // External links (and anything Google redirects we don't
+            // recognise) open in the system browser. Never silently
+            // kill the navigation: forward it.
+            if matches!(url.scheme(), "https" | "http" | "mailto") {
+                let _ = open::that_detached(url.as_str());
+            }
+            false
+        })
+        .build()?;
+
+    // ponytail: hide-to-tray lives with construction so rebuilt windows keep it
+    let hide_clone = window.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            if !IS_QUITTING.load(Ordering::SeqCst) {
+                api.prevent_close();
+                let _ = hide_clone.hide();
+            }
+        }
+    });
+    Ok(window)
+}
+
 fn show_main(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        return;
+    }
+    // ponytail: tray-only trap — main window gone, rebuild it
+    if let Ok(window) = build_main_window(app) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
@@ -236,28 +282,7 @@ fn main() {
             }
             *APP_HANDLE.lock().unwrap() = Some(app.handle().clone());
 
-            let target: url::Url = TARGET_URL.parse().unwrap();
-            let main_window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(target))
-                .title("YouTube Music")
-                .inner_size(1200.0, 900.0)
-                .min_inner_size(400.0, 300.0)
-                .initialization_script(INIT_SCRIPT)
-                .initialization_script(BRIDGE_JS)
-                .additional_browser_args(BROWSER_ARGS)
-                .disable_drag_drop_handler()
-                .on_navigation(|url| {
-                    if is_allowed_url(url) {
-                        return true;
-                    }
-                    // External links (and anything Google redirects we don't
-                    // recognise) open in the system browser. Never silently
-                    // kill the navigation: forward it.
-                    if matches!(url.scheme(), "https" | "http" | "mailto") {
-                        let _ = open::that_detached(url.as_str());
-                    }
-                    false
-                })
-                .build()?;
+            let main_window = build_main_window(app.handle())?;
 
             // SMTC is bound to this window's HWND — required on Windows.
             if let Ok(hwnd) = main_window.hwnd() {
@@ -267,20 +292,14 @@ fn main() {
                 eprintln!("[smtc] could not retrieve main window HWND; media keys disabled");
             }
 
-            // Hide to tray on close (real exit only via tray "Quit").
-            let win_clone = main_window.clone();
-            main_window.on_window_event(move |event| {
-                if let WindowEvent::CloseRequested { api, .. } = event {
-                    if !IS_QUITTING.load(Ordering::SeqCst) {
-                        api.prevent_close();
-                        let _ = win_clone.hide();
-                    }
-                }
-            });
-
             // Start minimized-to-tray when launched at startup.
             if std::env::args().any(|arg| arg == "--autostart") {
                 let _ = main_window.hide();
+            } else {
+                // ponytail: guarantee visible window on manual launch
+                let _ = main_window.show();
+                let _ = main_window.unminimize();
+                let _ = main_window.set_focus();
             }
 
             build_tray(app.handle())?;
@@ -357,7 +376,28 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_allowed_host, is_allowed_url};
+    use super::{is_allowed_host, is_allowed_url, BROWSER_ARGS};
+
+    /// The mini window (tauri.conf.json) and the main window (Rust) share one
+    /// WebView2 browser process; WebView2 rejects environment creation with
+    /// ERROR_INVALID_STATE (0x8007139F) when their browser args differ, which
+    /// kills the main window right after launch.
+    #[test]
+    fn mini_and_main_browser_args_match() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let mini = conf["app"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["label"] == "mini")
+            .unwrap();
+        assert_eq!(
+            mini["additionalBrowserArgs"].as_str().unwrap(),
+            BROWSER_ARGS,
+            "mini window additionalBrowserArgs must equal BROWSER_ARGS in main.rs"
+        );
+    }
 
     #[test]
     fn allows_ytm_and_login_hosts() {

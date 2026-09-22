@@ -6,7 +6,7 @@ A Windows desktop app for YouTube Music, built with Rust, Tauri 2 and Microsoft 
 
 ## Downloads
 
-[Download v0.1.1](https://github.com/nwn900/yt-music-desktop/releases/tag/v0.1.1) — Windows x64 NSIS installer, compiled locally.
+[Download v0.1.2](https://github.com/nwn900/yt-music-desktop/releases/tag/v0.1.2) — Windows x64 NSIS installer, compiled locally.
 
 ## Features
 

@@ -1,6 +1,6 @@
 [package]
 name = "yt-music-desktop"
-version = "0.1.2"
+version = "0.1.3"
 description = "Native desktop wrapper for YouTube Music (WebView2, SMTC media keys, tray, mini-player)"
 authors = ["micha"]
 license = "ISC"
@@ -20,6 +20,11 @@ open = "5"
 url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# VS 2026 / MSVC 14.50+ link.exe rejects the COMDAT that upstream
+# vswhom-sys 0.1.x emits. See local-patches/README.md.
+[patch.crates-io]
+vswhom-sys = { path = "../local-patches/vswhom-sys-0.1.3" }
 
 [features]
 default = ["custom-protocol"]

@@ -1,6 +1,7 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod lifecycle;
 mod smtc;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,9 +39,25 @@ const ALLOWED_HOSTS: &[&str] = &[
 
 /// wry REPLACES its default browser args when this is set, so the
 /// msWebOOUI/msPdfOOUI/msSmartScreenProtection disables are re-appended.
-/// anti-throttling flags keep audio + the bridge alive while hidden;
-/// autoplay-policy restores playback after app restart.
-const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,OverlayScrollbarFlashAfterAnyScrollUpdate --disable-background-timer-throttling --disable-renderer-backgrounding --autoplay-policy=no-user-gesture-required";
+///
+/// Everything else here exists to keep audio playing when the window is not
+/// in front. Chromium has four independent ways to deprioritise a window
+/// nobody is looking at, and each one has cost this app playback:
+///
+/// * `disable-background-timer-throttling` — clamps page timers to ~1/s.
+///   YouTube Music refills its MediaSource buffer from JS, so a starved
+///   timer means an empty buffer and a stall.
+/// * `disable-renderer-backgrounding` — drops the renderer to background
+///   process priority when the window is hidden or minimised.
+/// * `disable-backgrounding-occluded-windows` — treats a window that is
+///   merely *covered* as hidden, which is the "not on the forefront" case.
+/// * `CalculateNativeWinOcclusion` — the Windows occlusion tracker behind
+///   that decision. Disabled so a covered window is never marked hidden.
+/// * `IntensiveWakeUpThrottling` — a second, separate clamp that kicks in
+///   after five minutes hidden and is *not* covered by the timer switch.
+///
+/// `autoplay-policy` restores playback after an app restart.
+const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,OverlayScrollbarFlashAfterAnyScrollUpdate,CalculateNativeWinOcclusion,IntensiveWakeUpThrottling --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --autoplay-policy=no-user-gesture-required";
 
 /// Runs on every page load. Kept minimal: webdriver flag, window.open
 /// same-tab redirect, _blank-link rewrite, YTM transport-click helpers.
@@ -58,12 +75,16 @@ document.addEventListener('click', function (e) {
     }
 }, true);
 window.__ytmSeek = function (secs) {
+    if (window.__ytmNoteIntent) { window.__ytmNoteIntent(); }
     var v = document.querySelector('video');
     if (v && v.duration && isFinite(secs) && secs >= 0) {
         v.currentTime = Math.min(secs, v.duration);
     }
 };
 window.clickTransport = function (action) {
+    // Media keys and the mini-player drive playback from outside the page;
+    // the keep-alive watchdog must not undo a pause the user asked for.
+    if (window.__ytmNoteIntent) { window.__ytmNoteIntent(); }
     var video = document.querySelector('video');
     if (action === 'next' || action === 'previous') {
         document.querySelector(action === 'next' ? '.next-button' : '.previous-button')?.click();
@@ -142,16 +163,12 @@ pub(crate) fn build_main_window(
 
 fn show_main(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+        lifecycle::restore_window(window);
         return;
     }
     // ponytail: tray-only trap — main window gone, rebuild it
     if let Ok(window) = build_main_window(app) {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+        lifecycle::restore_window(window);
     }
 }
 
@@ -160,9 +177,16 @@ fn toggle_mini(app: &tauri::AppHandle) {
         if win.is_visible().unwrap_or(false) {
             let _ = win.hide();
         } else {
-            let _ = win.show();
-            let _ = win.set_focus();
+            lifecycle::restore_window(win);
         }
+    }
+}
+
+/// Reload the page. The escape hatch when YouTube Music wedges itself: the
+/// window keeps its position and the session survives in the WebView2 profile.
+fn reload_main(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.eval("location.reload()");
     }
 }
 
@@ -196,21 +220,29 @@ fn media_update(
         if !last.is_empty()
             && (!window.is_focused().unwrap_or(false) || !window.is_visible().unwrap_or(false))
         {
+            // WinRT toast activation can take a hundred milliseconds. Keep it
+            // off the IPC thread so a track change cannot stall the page.
             let handle = app.clone();
-            tauri_winrt_notification::Toast::new(&app.config().identifier)
-                .title("YouTube Music")
-                .text1(&track.chars().take(300).collect::<String>())
-                .on_activated(move |_| {
-                    show_main(&handle);
-                    Ok(())
-                })
-                .show()
-                .unwrap_or_else(|error| eprintln!("Track notification failed: {error}"));
+            let identifier = app.config().identifier.clone();
+            let text: String = track.chars().take(300).collect();
+            std::thread::spawn(move || {
+                tauri_winrt_notification::Toast::new(&identifier)
+                    .title("YouTube Music")
+                    .text1(&text)
+                    .on_activated(move |_| {
+                        show_main(&handle);
+                        Ok(())
+                    })
+                    .show()
+                    .unwrap_or_else(|error| eprintln!("Track notification failed: {error}"));
+            });
         }
         *last = track;
     }
     if smtc.update(&state) {
-        let _ = app.emit("media-state", &state);
+        // Only the mini-player listens. Emitting to every window would run a
+        // JS eval inside the YouTube Music page twice a second.
+        let _ = app.emit_to("mini", "media-state", &state);
     }
     Ok(())
 }
@@ -282,6 +314,13 @@ fn main() {
             }
             *APP_HANDLE.lock().unwrap() = Some(app.handle().clone());
 
+            // Clear WebView2 processes a killed run left behind before this
+            // process builds its own, so a stale tree cannot fight this launch
+            // over the same EBWebView profile.
+            lifecycle::reap_orphans(app.handle());
+            lifecycle::start_watchdog(app.handle().clone());
+            lifecycle::start_power_guard(app.handle().clone());
+
             let main_window = build_main_window(app.handle())?;
 
             // SMTC is bound to this window's HWND — required on Windows.
@@ -315,6 +354,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
     let open_item = MenuItem::with_id(app, "open", "Open YouTube Music", true, None::<&str>)?;
     let mini_item = MenuItem::with_id(app, "mini", "Mini player", true, None::<&str>)?;
+    let reload_item = MenuItem::with_id(app, "reload", "Reload page", true, None::<&str>)?;
     let startup_item = CheckMenuItem::with_id(
         app,
         "startup",
@@ -330,6 +370,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         &[
             &open_item,
             &mini_item,
+            &reload_item,
             &separator,
             &startup_item,
             &separator,
@@ -345,6 +386,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(move |app_handle, event| match event.id().as_ref() {
             "open" => show_main(app_handle),
             "mini" => toggle_mini(app_handle),
+            "reload" => reload_main(app_handle),
             "startup" => {
                 let manager = app_handle.autolaunch();
                 if manager.is_enabled().unwrap_or(false) {
@@ -397,6 +439,37 @@ mod tests {
             BROWSER_ARGS,
             "mini window additionalBrowserArgs must equal BROWSER_ARGS in main.rs"
         );
+    }
+
+    /// Every switch that stops Chromium from deprioritising a background
+    /// window must survive edits to BROWSER_ARGS: losing one is exactly the
+    /// "music stutters when the app is not in front" bug.
+    #[test]
+    fn browser_args_keep_background_playback_alive() {
+        for switch in [
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            "--disable-backgrounding-occluded-windows",
+            "--autoplay-policy=no-user-gesture-required",
+        ] {
+            assert!(BROWSER_ARGS.contains(switch), "BROWSER_ARGS lost {switch}");
+        }
+        let features = BROWSER_ARGS
+            .split_whitespace()
+            .find_map(|arg| arg.strip_prefix("--disable-features="))
+            .expect("BROWSER_ARGS must carry a --disable-features list");
+        for feature in [
+            "msWebOOUI",
+            "msPdfOOUI",
+            "msSmartScreenProtection",
+            "CalculateNativeWinOcclusion",
+            "IntensiveWakeUpThrottling",
+        ] {
+            assert!(
+                features.split(',').any(|f| f == feature),
+                "BROWSER_ARGS lost the {feature} feature disable"
+            );
+        }
     }
 
     #[test]
